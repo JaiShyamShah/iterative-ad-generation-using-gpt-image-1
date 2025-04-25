@@ -75,7 +75,8 @@ def generate_initial_image(prompt):
             model="gpt-image-1",
             prompt=prompt,
             n=1,
-            size="1024x1024"
+            size="1024x1024",
+            quality="low",
         )
         
         # Get the base64 encoded image directly
@@ -125,15 +126,6 @@ def edit_image_with_prompt(base_image, edit_instructions):
             
         return f"data:image/png;base64,{image_b64}"
             
-    except openai.error.InvalidRequestError as e:
-        if e.error and e.error.get('code') == 'moderation_blocked':
-            st.error("The edit request was blocked by the safety system. Please review the edit instructions above and ensure they are appropriate. Consider simplifying or modifying the instructions.")
-        else:
-            st.error(f"Image editing error: {str(e)}")
-        # Clean up temp file if it exists
-        if os.path.exists("temp_image.png"):
-            os.remove("temp_image.png")
-        return None
     except Exception as e:
         st.error(f"Image editing error: {str(e)}")
         # Clean up temp file if it exists
@@ -146,7 +138,7 @@ def analyze_and_improve(image_b64, ad_concept, iteration):
     st.info(f"Analyzing iteration {iteration}...")
     
     critique_prompt = f"""
-    Analyze this Facebook ad (iteration {iteration}) and suggest editing improvements:
+    Analyze this Facebook ad (iteration {iteration}) and suggest improvements:
     
     Current Ad:
     - Headline: {ad_concept['headline']}
@@ -154,18 +146,23 @@ def analyze_and_improve(image_b64, ad_concept, iteration):
     - CTA: {ad_concept['cta']}
     
     Provide specific feedback on:
-    1. Visual elements that need modification
-    2. Composition adjustments
-    3. Color scheme improvements
-    4. Element positioning
+    1. Headline effectiveness and alternatives
+    2. Element additions/removals
+    3. Visual elements that need modification
+    4. Composition adjustments
+    5. Color scheme improvements
+    6. Element positioning optimizations
     
-    When suggesting edit instructions, be as specific as possible and ensure they are safe, professional, and suitable for all audiences. Avoid any requests that could be interpreted as explicit, violent, or inappropriate. Focus on aesthetic improvements such as color adjustments, composition changes, and element positioning.
+    When suggesting instructions, be as specific as possible and ensure they are safe, professional, and suitable for all audiences. Avoid any requests that could be interpreted as explicit, violent, or inappropriate. Focus on aesthetic improvements such as color adjustments, composition changes, and element positioning.
     
     For example, instead of saying 'make it better', say 'increase the brightness of the background' or 'add a soft shadow to the text'.
     
     Return JSON with:
-    - critique: Your analysis
-    - edit_instructions: Detailed editing instructions for GPT-Image-1
+    - critique: Concise analysis addressing all 7 points above
+    - recommendation: Either "edit" or "new" based on whether you recommend editing the current image or creating a new one
+    - edit_instructions: Detailed editing instructions if recommendation is "edit"
+    - generation_instructions: Detailed generation instructions if recommendation is "new"
+    - headline_variants: 3 improved headline options
     """
     
     try:
@@ -174,7 +171,7 @@ def analyze_and_improve(image_b64, ad_concept, iteration):
             messages=[
                 {
                     "role": "system",
-                    "content": "You are an expert image editor. When providing edit instructions, ensure they are safe, professional, and suitable for all audiences. Avoid any requests that could be interpreted as explicit, violent, or inappropriate. Focus on visual improvements such as color adjustments, composition changes, and element positioning. Return only valid JSON with 'critique' and 'edit_instructions' fields."
+                    "content": "You are an expert image editor. When providing instructions, ensure they are safe, professional, and suitable for all audiences. Avoid any requests that could be interpreted as explicit, violent, or inappropriate. Focus on visual improvements such as color adjustments, composition changes, and element positioning. Return JSON with 'critique', 'recommendation' (either 'edit' or 'new'), and either 'edit_instructions' or 'generation_instructions' based on your recommendation."
                 },
                 {
                     "role": "user",
@@ -200,7 +197,13 @@ def analyze_and_improve(image_b64, ad_concept, iteration):
         result = json.loads(response.choices[0].message.content)
         
         # Validate response contains required fields
-        if 'critique' in result and 'edit_instructions' in result:
+        if 'critique' in result and 'recommendation' in result:
+            if result['recommendation'] == 'edit' and 'edit_instructions' not in result:
+                st.error("Missing edit instructions in critique response")
+                return None
+            elif result['recommendation'] == 'new' and 'generation_instructions' not in result:
+                st.error("Missing generation instructions in critique response")
+                return None
             return result
         else:
             st.error(f"Missing required fields in critique: {result}")
@@ -254,29 +257,29 @@ def main():
                     st.session_state.iterations.append({
                         'iteration': 0,
                         'image': initial_image,
-                        'edit_instructions': st.session_state.ad_concept['image_edit_instructions']
+                        'instructions': st.session_state.ad_concept['image_edit_instructions'],
+                        'type': 'generate'
                     })
                     st.rerun()
                 else:
                     st.error("Failed to generate initial image")
 
-
     # Display current status
     if st.session_state.ad_concept:
-        st.write("### Current Editing Instructions")
+        st.write("### Current Advertising Concept")
         st.json(st.session_state.ad_concept)
     
     # Generate editing iterations
     if st.session_state.ad_concept and st.session_state.current_iteration < st.session_state.max_iterations:
-        if st.button(f"Apply Edit {st.session_state.current_iteration + 1}"):
+        if st.button(f"Apply Iteration {st.session_state.current_iteration + 1}"):
             if not st.session_state.iterations:
                 st.error("No initial image found - please start the editing process first")
                 return
                 
-            with st.spinner(f"Applying edit {st.session_state.current_iteration + 1}..."):
+            with st.spinner(f"Applying iteration {st.session_state.current_iteration + 1}..."):
                 last_image = st.session_state.iterations[-1]['image']
                 
-                # Get analysis and edit instructions
+                # Get analysis and improvement instructions
                 analysis = analyze_and_improve(
                     last_image,
                     st.session_state.ad_concept,
@@ -284,43 +287,60 @@ def main():
                 )
                 
                 if not analysis:
-                    st.error("Failed to generate edit instructions")
+                    st.error("Failed to generate improvement instructions")
                     return
                 
-                # Apply edit - Use the string value directly from analysis
-                edited_image = edit_image_with_prompt(
-                    last_image,
-                    analysis['edit_instructions']  # This should be a string
-                )
+                # Based on the recommendation, either edit the existing image or generate a new one
+                if analysis['recommendation'] == 'edit':
+                    # Apply edit to the existing image
+                    result_image = edit_image_with_prompt(
+                        last_image,
+                        analysis['edit_instructions']
+                    )
+                    instruction_text = analysis['edit_instructions']
+                    op_type = 'edit'
+                else:  # recommendation is 'new'
+                    # Generate a new image
+                    result_image = generate_initial_image(
+                        analysis['generation_instructions']
+                    )
+                    instruction_text = analysis['generation_instructions']
+                    op_type = 'generate'
                 
-                if edited_image:
+                if result_image:
                     st.session_state.iterations.append({
                         'iteration': st.session_state.current_iteration + 1,
-                        'image': edited_image,
-                        'edit_instructions': analysis['edit_instructions'],
-                        'critique': analysis['critique']
+                        'image': result_image,
+                        'instructions': instruction_text,
+                        'critique': analysis['critique'],
+                        'recommendation': analysis['recommendation'],
+                        'type': op_type
                     })
                     st.session_state.current_iteration += 1
                     st.rerun()
                 else:
-                    st.error("Failed to apply edit")
+                    st.error(f"Failed to {op_type} image")
 
     # Display all iterations
     if st.session_state.iterations:
         st.write("## Editing History")
         
         for i, iteration in enumerate(st.session_state.iterations):
-            with st.expander(f"Edit {i}", expanded=i == len(st.session_state.iterations)-1):
+            with st.expander(f"Iteration {i}", expanded=i == len(st.session_state.iterations)-1):
                 col1, col2 = st.columns([1, 1])
                 
                 with col1:
-                    st.image(iteration['image'], use_column_width=True)
-                    st.caption(f"Edit instructions: {iteration.get('edit_instructions', 'No instructions')}")
+                    st.image(iteration['image'], use_container_width=True)
+                    operation = "Generated" if iteration.get('type') == 'generate' else "Edited"
+                    st.caption(f"{operation} with: {iteration.get('instructions', 'No instructions')}")
                 
                 with col2:
-                    if 'critique' in iteration:
+                    if i > 0:  # Skip for the initial image
                         st.write("### Feedback")
-                        st.write(iteration['critique'])
+                        st.write(iteration.get('critique', 'No critique available'))
+                        if 'recommendation' in iteration:
+                            recommendation = iteration['recommendation']
+                            st.write(f"**AI Recommendation:** {recommendation.capitalize()} the image")
 
     # Final result
     if (st.session_state.iterations and 
